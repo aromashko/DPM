@@ -171,28 +171,34 @@ def process_document(docx_base64: str, data: dict) -> tuple[str, str]:
         os.makedirs(lo_profile_dir, exist_ok=True)
 
         # 7. Конвертировать в PDF через LibreOffice
-        result = subprocess.run(
-            [
-                LIBREOFFICE_PATH,
-                "--headless",
-                "--norestore",
-                "--safe",
-                f"-env:UserInstallation=file://{lo_profile_dir}",
-                "--convert-to",
-                "pdf",
-                tmp_docx_path,
-                "--outdir",
-                tmp_dir,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=LIBREOFFICE_TIMEOUT,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    LIBREOFFICE_PATH,
+                    "--headless",
+                    "--norestore",
+                    "--safe",
+                    f"-env:UserInstallation=file://{lo_profile_dir}",
+                    "--convert-to",
+                    "pdf",
+                    tmp_docx_path,
+                    "--outdir",
+                    tmp_dir,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=LIBREOFFICE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"LibreOffice conversion timed out after {LIBREOFFICE_TIMEOUT}s. "
+                f"Process may have been killed. stdout: {e.stdout}, stderr: {e.stderr}"
+            )
 
         if result.returncode != 0:
             raise RuntimeError(
                 f"LibreOffice conversion failed (exit code {result.returncode}): "
-                f"{result.stderr}"
+                f"stderr: {result.stderr}, stdout: {result.stdout}"
             )
 
         # 8. Прочитать получившийся PDF
@@ -354,19 +360,22 @@ def handle_message(
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
+        correlation_id = (
+            original_message.get("metadata", {}).get("correlation_id", "unknown")
+            if original_message
+            else "unknown"
+        )
+        template_name = (
+            original_message.get("template_name", "unknown")
+            if original_message
+            else "unknown"
+        )
+
         logger.error(
             "Document processing failed",
             extra={
-                "correlation_id": (
-                    original_message.get("metadata", {}).get("correlation_id", "unknown")
-                    if original_message
-                    else "unknown"
-                ),
-                "template_name": (
-                    original_message.get("template_name", "unknown")
-                    if original_message
-                    else "unknown"
-                ),
+                "correlation_id": correlation_id,
+                "template_name": template_name,
                 "error": error_msg,
             },
         )
@@ -375,6 +384,14 @@ def handle_message(
         try:
             if original_message is not None:
                 publish_error(channel, original_message, error_msg)
+                logger.info(
+                    "Error message published to ERROR_QUEUE",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "template_name": template_name,
+                        "queue": ERROR_QUEUE,
+                    },
+                )
             else:
                 # Если не удалось распарсить сообщение — отправляем сырые данные
                 publish_error(
@@ -382,18 +399,43 @@ def handle_message(
                     {"raw_body": body.decode("utf-8", errors="replace")},
                     error_msg,
                 )
+                logger.info(
+                    "Error message published to ERROR_QUEUE (raw body)",
+                    extra={
+                        "correlation_id": "unknown",
+                        "template_name": "unknown",
+                        "queue": ERROR_QUEUE,
+                    },
+                )
         except Exception as publish_err:
             logger.error(
                 "Failed to publish error message",
-                extra={"error": str(publish_err)},
+                extra={
+                    "error": str(publish_err),
+                    "correlation_id": correlation_id,
+                },
             )
 
     finally:
         # Всегда подтверждаем сообщение
         try:
             channel.basic_ack(delivery_tag=method.delivery_tag)
-        except Exception:
-            pass  # Connection may already be lost
+            logger.debug(
+                "Message acknowledged",
+                extra={
+                    "delivery_tag": method.delivery_tag,
+                    "correlation_id": (
+                        original_message.get("metadata", {}).get("correlation_id", "unknown")
+                        if original_message
+                        else "unknown"
+                    ),
+                },
+            )
+        except Exception as ack_err:
+            logger.warning(
+                "Failed to acknowledge message (connection may be lost)",
+                extra={"error": str(ack_err)},
+            )
 
 
 # ─── Main Entry Point ────────────────────────────────────────────────────────
