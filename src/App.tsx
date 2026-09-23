@@ -1032,6 +1032,61 @@ function QATab() {
         </div>
       </div>
 
+      {/* Additional checks */}
+      <div>
+        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <span className="text-purple-400">🔬</span> Дополнительная проверка кода
+        </h3>
+        <div className="space-y-3">
+          {[
+            {
+              id: 'CHECK-001',
+              title: 'Валидация metadata',
+              status: 'already_fixed',
+              desc: 'Проверка типа metadata уже присутствовала в validate_message()',
+            },
+            {
+              id: 'CHECK-002',
+              title: 'Валидация data',
+              status: 'already_fixed',
+              desc: 'Проверка типа data уже присутствовала в validate_message()',
+            },
+            {
+              id: 'CHECK-003',
+              title: 'content_type в сообщениях',
+              status: 'already_fixed',
+              desc: 'content_type="application/json" уже был установлен в publish_success() и publish_error()',
+            },
+            {
+              id: 'CHECK-004',
+              title: 'Логирование ack и публикации',
+              status: 'fixed_now',
+              desc: 'Добавлено логирование ack (debug/warning) и публикации в ERROR_QUEUE (info)',
+            },
+            {
+              id: 'CHECK-005',
+              title: 'Временные файлы при timeout',
+              status: 'already_fixed',
+              desc: 'TemporaryDirectory автоматически очищает файлы при любом исключении',
+            },
+          ].map((check) => (
+            <div key={check.id} className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3">
+              <div className="flex items-start gap-3">
+                <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                  check.status === 'fixed_now' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'
+                }`}>
+                  {check.status === 'fixed_now' ? 'ИСПРАВЛЕНО' : 'УЖЕ OK'}
+                </span>
+                <div className="flex-1">
+                  <h4 className="text-sm font-medium text-white">{check.id}: {check.title}</h4>
+                  <p className="text-xs text-slate-400 mt-1">{check.desc}</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Remaining recommendations */}
       <div>
         <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
