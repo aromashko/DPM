@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# QA & Docs (не нужны в образе)
+QA_REPORT.txt
+project_description.txt
+README.md
+
+# Build artifacts
+dist/
+node_modules/
+*.egg-info/
+
+# Temp files
+/tmp/
+*.log
