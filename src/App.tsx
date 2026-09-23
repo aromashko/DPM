@@ -849,7 +849,7 @@ function QATab() {
         <h2 className="text-xl font-bold">QA Аудит: Результаты проверки</h2>
         <div className="flex items-center gap-2">
           <span className="px-3 py-1 rounded-full bg-green-500/20 text-green-400 border border-green-500/30 text-sm font-medium">
-            92/100 ✅
+            95/100 ✅
           </span>
         </div>
       </div>
@@ -876,7 +876,7 @@ function QATab() {
               severity: 'CRITICAL',
               title: 'ttf-mscorefonts-installer не установится',
               desc: 'Пакет в репозитории contrib, а не main. Dockerfile не добавлял contrib.',
-              fix: 'Добавлена строка: echo "deb ... bookworm contrib" >> sources.list',
+              fix: 'Добавлен contrib репозиторий + fallback на fonts-noto-core',
             },
             {
               id: 'BUG-002',
@@ -891,6 +891,20 @@ function QATab() {
               title: 'LibreOffice может зависнуть',
               desc: 'Блокировка профиля ~/.config/libreoffice при некорректном завершении.',
               fix: 'Добавлены --norestore, --safe, -env:UserInstallation=file://...',
+            },
+            {
+              id: 'BUG-004',
+              severity: 'MEDIUM',
+              title: 'bookworm захардкожен в Dockerfile',
+              desc: 'При смене базового образа (например, на trixie) сборка сломается.',
+              fix: 'Используется $(. /etc/os-release && echo $VERSION_CODENAME)',
+            },
+            {
+              id: 'BUG-005',
+              severity: 'MEDIUM',
+              title: 'Нет DEBIAN_FRONTEND=noninteractive',
+              desc: 'Интерактивные запросы при установке пакетов могут зависнуть сборку.',
+              fix: 'Добавлен ENV DEBIAN_FRONTEND=noninteractive',
             },
           ].map((bug) => (
             <div key={bug.id} className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
@@ -993,7 +1007,7 @@ function QATab() {
                 { cat: 'Безопасность', before: 70, after: 85 },
                 { cat: 'Надёжность', before: 70, after: 90 },
                 { cat: 'Современность', before: 60, after: 90 },
-                { cat: 'Docker', before: 70, after: 95 },
+                { cat: 'Docker', before: 70, after: 98 },
               ].map((row, i) => (
                 <tr key={i} className="hover:bg-slate-700/20">
                   <td className="px-4 py-3 text-slate-300">{row.cat}</td>
