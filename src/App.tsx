@@ -172,7 +172,9 @@ function OverviewTab() {
             <div className="pl-4">├── <span className="text-yellow-400">Dockerfile</span> <span className="text-slate-500">— образ контейнера</span></div>
             <div className="pl-4">├── <span className="text-yellow-400">docker-compose.yml</span> <span className="text-slate-500">— оркестрация сервисов</span></div>
             <div className="pl-4">├── <span className="text-yellow-400">requirements.txt</span> <span className="text-slate-500">— Python-зависимости</span></div>
-            <div className="pl-4">└── <span className="text-yellow-400">.env.example</span> <span className="text-slate-500">— шаблон переменных окружения</span></div>
+            <div className="pl-4">├── <span className="text-yellow-400">.env.example</span> <span className="text-slate-500">— шаблон переменных окружения</span></div>
+            <div className="pl-4">├── <span className="text-green-400">README.md</span> <span className="text-slate-500">— документация репозитория</span></div>
+            <div className="pl-4">└── <span className="text-purple-400">project_description.txt</span> <span className="text-slate-500">— описание задачи</span></div>
           </div>
         </div>
       </div>
@@ -347,6 +349,130 @@ LOG_LEVEL=INFO
 
 # LibreOffice
 LIBREOFFICE_PATH=libreoffice`
+    },
+    {
+      name: 'README.md',
+      lang: 'markdown',
+      description: 'Документация репозитория',
+      content: `# DOCX Worker
+
+Микросервис-воркер для обработки DOCX-шаблонов: заполнение данными и конвертация в PDF.
+
+## 📋 Описание
+
+Сервис слушает очередь RabbitMQ, получает задачи на заполнение DOCX-шаблонов данными,
+выполняет подстановку через docxtpl, конвертирует результат в PDF через LibreOffice
+и публикует готовые документы в выходную очередь.
+
+## 🚀 Быстрый старт
+
+\`\`\`bash
+cp .env.example .env
+docker-compose up -d
+docker-compose logs -f worker
+\`\`\`
+
+## 📨 Форматы сообщений
+
+### Входящее (INPUT_QUEUE)
+\`\`\`json
+{
+  "template_name": "имя_шаблона.docx",
+  "docx_content_base64": "base64-содержимое .docx шаблона",
+  "data": { ... },
+  "metadata": { "correlation_id": "uuid", ... }
+}
+\`\`\`
+
+### Успех (OUTPUT_QUEUE)
+\`\`\`json
+{
+  "pdf_content_base64": "base64 PDF",
+  "docx_content_base64": "base64 DOCX",
+  "original_metadata": { ... },
+  "status": "success",
+  "template_name": "имя_шаблона.docx"
+}
+\`\`\`
+
+### Ошибка (ERROR_QUEUE)
+\`\`\`json
+{
+  "original_message": { ... },
+  "error_message": "текст ошибки",
+  "status": "error",
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+\`\`\`
+
+## ⚙️ Конфигурация
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| RABBITMQ_HOST | localhost | Хост RabbitMQ |
+| RABBITMQ_PORT | 5672 | Порт RabbitMQ |
+| INPUT_QUEUE | docx_tasks | Входящая очередь |
+| OUTPUT_QUEUE | docx_results | Очередь результатов |
+| ERROR_QUEUE | docx_errors | Очередь ошибок |
+| LOG_LEVEL | INFO | Уровень логирования |
+
+## 🐳 Docker
+
+\`\`\`bash
+docker-compose up -d
+docker-compose logs -f worker
+docker-compose down
+\`\`\`
+
+## 📝 Лицензия
+
+MIT`
+    },
+    {
+      name: 'project_description.txt',
+      lang: 'text',
+      description: 'Полное описание задачи и требований',
+      content: `===============================================================================
+                    ОПИСАНИЕ ПРОЕКТА: DOCX WORKER
+              Микросервис-воркер для обработки документов
+===============================================================================
+
+1. ОБЩАЯ ЛОГИКА РАБОТЫ СЕРВИСА
+
+Сервис слушает очередь RabbitMQ (INPUT_QUEUE). Каждое сообщение — одна задача
+на обработку.
+
+Получив сообщение, он извлекает из него шаблон документа (.docx в base64),
+данные для подстановки (JSON), заполняет шаблон, конвертирует результат в PDF.
+
+Сформированный PDF и заполненный DOCX (оба в base64) вместе с метаданными
+отправляются в выходную очередь (OUTPUT_QUEUE).
+
+При любой ошибке исходное сообщение и описание ошибки отправляются в очередь
+ошибок (ERROR_QUEUE), сообщение подтверждается (ack).
+
+Обработка строго последовательная: одно сообщение за раз, без потоков и
+асинхронности.
+
+2. ФОРМАТЫ СООБЩЕНИЙ
+... (см. полный файл project_description.txt)
+
+3. КОНФИГУРАЦИЯ (ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ)
+...
+
+4. ДЕТАЛИ РЕАЛИЗАЦИИ НА PYTHON
+...
+
+5. ЛОГИРОВАНИЕ
+...
+
+6. DOCKER
+...
+
+7. ФАЙЛОВАЯ СТРУКТУРА ПРОЕКТА
+...
+
+===============================================================================`
     },
   ]
 

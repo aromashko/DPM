@@ -1,0 +1,163 @@
+===============================================================================
+                    ОПИСАНИЕ ПРОЕКТА: DOCX WORKER
+              Микросервис-воркер для обработки документов
+===============================================================================
+
+1. ОБЩАЯ ЛОГИКА РАБОТЫ СЕРВИСА
+───────────────────────────────────────────────────────────────────────────────
+
+Сервис слушает очередь RabbitMQ (INPUT_QUEUE). Каждое сообщение — одна задача
+на обработку.
+
+Получив сообщение, он извлекает из него шаблон документа (.docx в base64),
+данные для подстановки (JSON), заполняет шаблон, конвертирует результат в PDF.
+
+Сформированный PDF и заполненный DOCX (оба в base64) вместе с метаданными
+отправляются в выходную очередь (OUTPUT_QUEUE).
+
+При любой ошибке исходное сообщение и описание ошибки отправляются в очередь
+ошибок (ERROR_QUEUE), сообщение подтверждается (ack).
+
+Обработка строго последовательная: одно сообщение за раз, без потоков и
+асинхронности.
+
+
+2. ФОРМАТЫ СООБЩЕНИЙ
+───────────────────────────────────────────────────────────────────────────────
+
+Входящее (из INPUT_QUEUE):
+
+    {
+      "template_name": "имя_шаблона.docx",
+      "docx_content_base64": "base64-содержимое .docx шаблона",
+      "data": { ... },
+      "metadata": {
+        "correlation_id": "уникальный-идентификатор",
+        "... любые поля ..."
+      }
+    }
+
+Исходящее (успех, в OUTPUT_QUEUE):
+
+    {
+      "pdf_content_base64": "base64 PDF",
+      "docx_content_base64": "base64 заполненный DOCX",
+      "original_metadata": { ... },
+      "status": "success",
+      "template_name": "имя_шаблона.docx"
+    }
+
+Исходящее (ошибка, в ERROR_QUEUE):
+
+    {
+      "original_message": { ... },
+      "error_message": "текст ошибки",
+      "status": "error",
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+
+
+3. КОНФИГУРАЦИЯ (ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ)
+───────────────────────────────────────────────────────────────────────────────
+
+    Переменная          По умолчанию      Описание
+    ─────────────────   ──────────────    ─────────────────────────────────
+    RABBITMQ_HOST       localhost         Хост RabbitMQ
+    RABBITMQ_PORT       5672              Порт RabbitMQ
+    RABBITMQ_USER       guest             Пользователь
+    RABBITMQ_PASS       guest             Пароль
+    INPUT_QUEUE         docx_tasks        Входящая очередь
+    OUTPUT_QUEUE        docx_results      Очередь для успешных результатов
+    ERROR_QUEUE         docx_errors       Очередь для ошибок
+    LOG_LEVEL           INFO              Уровень логирования
+    LIBREOFFICE_PATH    libreoffice       Путь к исполняемому файлу LibreOffice
+
+
+4. ДЕТАЛИ РЕАЛИЗАЦИИ НА PYTHON
+───────────────────────────────────────────────────────────────────────────────
+
+Язык: Python 3.13.
+
+Библиотеки:
+  - pika (синхронный BlockingConnection)
+  - python-docx + docxtpl
+  - python-json-logger (структурированный JSON-логинг)
+  - subprocess, base64, json, os, io, logging
+
+Единый модуль worker.py, точка входа main().
+
+Алгоритм обработки:
+  1. Декодировать docx_content_base64 → байты.
+  2. Загрузить в io.BytesIO, создать DocxTemplate.
+  3. doc.render(data).
+  4. Сохранить заполненный docx в BytesIO, записать во временный файл /tmp/....
+  5. Вызвать subprocess.run([LIBREOFFICE_PATH, '--headless', '--convert-to',
+     'pdf', временный_файл.docx, '--outdir', '/tmp/']).
+  6. Прочитать получившийся PDF во временном каталоге.
+  7. Закодировать docx и pdf в base64.
+  8. Опубликовать JSON-результат в OUTPUT_QUEUE.
+  9. Удалить временные файлы.
+
+Обработка ошибок: try/except вокруг всей логики сообщения. При ошибке — лог,
+отправка в ERROR_QUEUE и ack исходного сообщения.
+
+
+5. ЛОГИРОВАНИЕ
+───────────────────────────────────────────────────────────────────────────────
+
+JSON-формат через pythonjsonlogger.JsonFormatter.
+
+Поля: timestamp, level, message, correlation_id (из metadata), template_name.
+
+Логируются: получение сообщения, старт обработки, успех, ошибки, публикация.
+
+
+6. DOCKER
+───────────────────────────────────────────────────────────────────────────────
+
+Dockerfile:
+  - База: python:3.13-slim.
+  - Установка LibreOffice: apt-get update && apt-get install -y
+    libreoffice-core libreoffice-writer.
+  - Установка шрифта Verdana с автоматическим принятием лицензии:
+
+        RUN echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
+            && apt-get install -y --no-install-recommends ttf-mscorefonts-installer \
+            && fc-cache -fv
+
+  - Копирование requirements.txt, установка pip-зависимостей.
+  - Копирование worker.py.
+  - CMD ["python", "worker.py"].
+
+docker-compose.yml:
+  - Сервис worker (build: .).
+  - Сервис rabbitmq (rabbitmq:3-management-alpine, порты 5672, 15672).
+  - Переменные окружения из .env или секции environment.
+
+.env.example — шаблон со всеми переменными из таблицы выше.
+
+
+7. ФАЙЛОВАЯ СТРУКТУРА ПРОЕКТА
+───────────────────────────────────────────────────────────────────────────────
+
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── .env.example
+    ├── requirements.txt
+    ├── worker.py
+    ├── README.md
+    └── project_description.txt
+
+
+8. ЗАВИСИМОСТИ (requirements.txt)
+───────────────────────────────────────────────────────────────────────────────
+
+    pika==1.3.2
+    python-docx==1.1.0
+    docxtpl==0.17.0
+    python-json-logger==2.0.7
+
+
+===============================================================================
+                         КОНЕЦ ОПИСАНИЯ ПРОЕКТА
+===============================================================================
