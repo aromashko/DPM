@@ -10,8 +10,10 @@ import io
 import json
 import logging
 import os
+import signal
 import subprocess
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -31,6 +33,15 @@ OUTPUT_QUEUE = os.getenv("OUTPUT_QUEUE", "docx_results")
 ERROR_QUEUE = os.getenv("ERROR_QUEUE", "docx_errors")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LIBREOFFICE_PATH = os.getenv("LIBREOFFICE_PATH", "libreoffice")
+
+# ─── Tuning Constants ────────────────────────────────────────────────────────
+
+LIBREOFFICE_TIMEOUT = int(os.getenv("LIBREOFFICE_TIMEOUT", "120"))
+MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", str(50 * 1024 * 1024)))  # 50 MB
+RECONNECT_BASE_DELAY = 5       # секунды
+RECONNECT_MAX_DELAY = 60       # секунды
+RABBITMQ_HEARTBEAT = 600
+RABBITMQ_BLOCKED_TIMEOUT = 300
 
 
 # ─── Logging Setup ───────────────────────────────────────────────────────────
@@ -54,6 +65,23 @@ def setup_logging() -> logging.Logger:
 logger = setup_logging()
 
 
+# ─── Graceful Shutdown ───────────────────────────────────────────────────────
+
+_shutdown_requested = False
+
+
+def _signal_handler(signum: int, frame) -> None:
+    """Обработчик сигналов SIGTERM/SIGINT для graceful shutdown."""
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name
+    logger.info("Shutdown signal received", extra={"signal": sig_name})
+    _shutdown_requested = True
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
+
+
 # ─── RabbitMQ Connection ─────────────────────────────────────────────────────
 
 def get_connection() -> pika.BlockingConnection:
@@ -63,8 +91,8 @@ def get_connection() -> pika.BlockingConnection:
         host=RABBITMQ_HOST,
         port=RABBITMQ_PORT,
         credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300,
+        heartbeat=RABBITMQ_HEARTBEAT,
+        blocked_connection_timeout=RABBITMQ_BLOCKED_TIMEOUT,
     )
     return pika.BlockingConnection(parameters)
 
@@ -74,6 +102,33 @@ def declare_queues(channel: pika.adapters.blocking_connection.BlockingChannel) -
     channel.queue_declare(queue=INPUT_QUEUE, durable=True)
     channel.queue_declare(queue=OUTPUT_QUEUE, durable=True)
     channel.queue_declare(queue=ERROR_QUEUE, durable=True)
+
+
+# ─── Validation ──────────────────────────────────────────────────────────────
+
+def validate_message(message: dict) -> None:
+    """
+    Валидация обязательных полей входящего сообщения.
+    Raises ValueError при невалидном сообщении.
+    """
+    required_fields = ["template_name", "docx_content_base64", "data", "metadata"]
+    missing = [f for f in required_fields if f not in message]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+    if not isinstance(message["data"], dict):
+        raise ValueError("'data' must be a JSON object")
+
+    if not isinstance(message["metadata"], dict):
+        raise ValueError("'metadata' must be a JSON object")
+
+    # Проверка base64
+    try:
+        decoded = base64.b64decode(message["docx_content_base64"], validate=True)
+        if len(decoded) == 0:
+            raise ValueError("'docx_content_base64' is empty")
+    except Exception as e:
+        raise ValueError(f"Invalid base64 in 'docx_content_base64': {e}")
 
 
 # ─── Document Processing ─────────────────────────────────────────────────────
@@ -104,54 +159,55 @@ def process_document(docx_base64: str, data: dict) -> tuple[str, str]:
     template.save(filled_docx_stream)
     filled_docx_bytes = filled_docx_stream.getvalue()
 
-    # 5. Записать во временный файл для LibreOffice
-    tmp_dir = tempfile.mkdtemp(prefix="docx_worker_")
-    tmp_docx_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.docx")
+    # 5. Использовать TemporaryDirectory для автоматической очистки
+    with tempfile.TemporaryDirectory(prefix="docx_worker_") as tmp_dir:
+        tmp_docx_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.docx")
 
-    with open(tmp_docx_path, "wb") as f:
-        f.write(filled_docx_bytes)
+        with open(tmp_docx_path, "wb") as f:
+            f.write(filled_docx_bytes)
 
-    # 6. Конвертировать в PDF через LibreOffice
-    result = subprocess.run(
-        [
-            LIBREOFFICE_PATH,
-            "--headless",
-            "--convert-to",
-            "pdf",
-            tmp_docx_path,
-            "--outdir",
-            tmp_dir,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+        # 6. Изолированный профиль LibreOffice (предотвращает зависания)
+        lo_profile_dir = os.path.join(tmp_dir, "lo_profile")
+        os.makedirs(lo_profile_dir, exist_ok=True)
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"LibreOffice conversion failed (exit code {result.returncode}): "
-            f"{result.stderr}"
+        # 7. Конвертировать в PDF через LibreOffice
+        result = subprocess.run(
+            [
+                LIBREOFFICE_PATH,
+                "--headless",
+                "--norestore",
+                "--safe",
+                f"-env:UserInstallation=file://{lo_profile_dir}",
+                "--convert-to",
+                "pdf",
+                tmp_docx_path,
+                "--outdir",
+                tmp_dir,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=LIBREOFFICE_TIMEOUT,
         )
 
-    # 7. Прочитать получившийся PDF
-    pdf_filename = os.path.splitext(os.path.basename(tmp_docx_path))[0] + ".pdf"
-    pdf_path = os.path.join(tmp_dir, pdf_filename)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"LibreOffice conversion failed (exit code {result.returncode}): "
+                f"{result.stderr}"
+            )
 
-    if not os.path.exists(pdf_path):
-        raise RuntimeError(
-            f"PDF file not found after conversion. Expected: {pdf_path}"
-        )
+        # 8. Прочитать получившийся PDF
+        pdf_filename = os.path.splitext(os.path.basename(tmp_docx_path))[0] + ".pdf"
+        pdf_path = os.path.join(tmp_dir, pdf_filename)
 
-    with open(pdf_path, "rb") as f:
-        pdf_bytes = f.read()
+        if not os.path.exists(pdf_path):
+            raise RuntimeError(
+                f"PDF file not found after conversion. Expected: {pdf_path}"
+            )
 
-    # 8. Удалить временные файлы
-    try:
-        os.remove(tmp_docx_path)
-        os.remove(pdf_path)
-        os.rmdir(tmp_dir)
-    except OSError:
-        pass  # Не критично
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+    # TemporaryDirectory автоматически удалён здесь (включая ошибки)
 
     # 9. Кодировать результаты в base64
     pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
@@ -248,8 +304,17 @@ def handle_message(
     original_message = None
 
     try:
+        # Проверка размера сообщения
+        if len(body) > MAX_MESSAGE_SIZE:
+            raise ValueError(
+                f"Message size {len(body)} exceeds limit {MAX_MESSAGE_SIZE}"
+            )
+
         # Парсинг сообщения
         original_message = json.loads(body.decode("utf-8"))
+
+        # Валидация
+        validate_message(original_message)
 
         template_name = original_message.get("template_name", "unknown")
         docx_base64 = original_message.get("docx_content_base64", "")
@@ -307,22 +372,42 @@ def handle_message(
         )
 
         # Отправка в очередь ошибок
-        if original_message is not None:
-            publish_error(channel, original_message, error_msg)
-        else:
-            # Если не удалось распарсить сообщение — отправляем сырые данные
-            publish_error(
-                channel,
-                {"raw_body": body.decode("utf-8", errors="replace")},
-                error_msg,
+        try:
+            if original_message is not None:
+                publish_error(channel, original_message, error_msg)
+            else:
+                # Если не удалось распарсить сообщение — отправляем сырые данные
+                publish_error(
+                    channel,
+                    {"raw_body": body.decode("utf-8", errors="replace")},
+                    error_msg,
+                )
+        except Exception as publish_err:
+            logger.error(
+                "Failed to publish error message",
+                extra={"error": str(publish_err)},
             )
 
     finally:
         # Всегда подтверждаем сообщение
-        channel.basic_ack(delivery_tag=method.delivery_tag)
+        try:
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+        except Exception:
+            pass  # Connection may already be lost
 
 
 # ─── Main Entry Point ────────────────────────────────────────────────────────
+
+def _consume_loop(channel: pika.adapters.blocking_connection.BlockingChannel) -> None:
+    """
+    Неблокирующий цикл обработки событий.
+    Проверяет флаг shutdown между итерациями.
+    """
+    while not _shutdown_requested:
+        # process_data_events обрабатывает входящие сообщения и heartbeat
+        # time_limit=1 — возврат управления каждую секунду для проверки shutdown
+        channel.connection.process_data_events(time_limit=1)
+
 
 def main() -> None:
     """Главная точка входа воркера."""
@@ -338,7 +423,10 @@ def main() -> None:
         },
     )
 
-    while True:
+    current_delay = RECONNECT_BASE_DELAY
+
+    while not _shutdown_requested:
+        connection = None
         try:
             connection = get_connection()
             channel = connection.channel()
@@ -356,28 +444,53 @@ def main() -> None:
                 auto_ack=False,
             )
 
+            # Сброс backoff при успешном подключении
+            current_delay = RECONNECT_BASE_DELAY
+
             logger.info("Worker is ready. Waiting for messages...")
-            channel.start_consuming()
+
+            # Неблокирующий цикл с проверкой shutdown flag
+            _consume_loop(channel)
+
+            if _shutdown_requested:
+                logger.info("Shutdown requested, stopping consumption...")
+                channel.stop_consuming()
 
         except pika.exceptions.AMQPConnectionError as e:
+            if _shutdown_requested:
+                break
             logger.error(
-                "RabbitMQ connection lost. Reconnecting in 5 seconds...",
-                extra={"error": str(e)},
+                "RabbitMQ connection lost. Reconnecting...",
+                extra={"error": str(e), "next_retry_seconds": current_delay},
             )
-            import time
-            time.sleep(5)
+            time.sleep(current_delay)
+            current_delay = min(current_delay * 2, RECONNECT_MAX_DELAY)
 
         except KeyboardInterrupt:
             logger.info("Worker stopped by user (KeyboardInterrupt)")
             break
 
         except Exception as e:
+            if _shutdown_requested:
+                break
             logger.error(
-                "Unexpected error in main loop. Reconnecting in 5 seconds...",
-                extra={"error": f"{type(e).__name__}: {str(e)}"},
+                "Unexpected error in main loop. Reconnecting...",
+                extra={
+                    "error": f"{type(e).__name__}: {str(e)}",
+                    "next_retry_seconds": current_delay,
+                },
             )
-            import time
-            time.sleep(5)
+            time.sleep(current_delay)
+            current_delay = min(current_delay * 2, RECONNECT_MAX_DELAY)
+
+        finally:
+            if connection and connection.is_open:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    logger.info("Worker shut down gracefully")
 
 
 if __name__ == "__main__":

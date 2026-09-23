@@ -1,9 +1,6 @@
-version: "3.8"
-
 services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: docx_worker_rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -20,7 +17,6 @@ services:
 
   worker:
     build: .
-    container_name: docx_worker
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -35,6 +31,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LIBREOFFICE_PATH: ${LIBREOFFICE_PATH:-libreoffice}
     restart: unless-stopped
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
 
 volumes:
   rabbitmq_data:
